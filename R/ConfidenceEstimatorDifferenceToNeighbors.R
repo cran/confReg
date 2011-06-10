@@ -1,0 +1,72 @@
+########################################## CONFIDENCE ESTIMATOR DIFFERENCE TO NEIGHBORS ################################
+
+setMethod("ConfidenceEstimatorDifferenceToNeighbors", signature("Regression", "Dataset" ), function(regressionModel, trainingData, qualityFunction = averageError) {
+	new("ConfidenceEstimatorDifferenceToNeighbors", regressionModel, trainingData, qualityFunction);
+})
+
+
+setMethod("create", signature("ConfidenceEstimatorDifferenceToNeighbors","logical", "vector"), function(.Object, optimize, predictionsOfTrainingData) {
+	callNextMethod();
+	.Object@confidenceIntervals <- matrix()
+	
+	if (optimize)
+	{
+		numberOfFolds <- 5;	
+		foldResults <- c(0,0,0);
+		for (i in 1:numberOfFolds)
+		{
+			foldResults <- foldResults + optimize(.Object, optimize = "neighbors");
+		}
+		foldResults <- foldResults / numberOfFolds;
+		
+		# save obtained results in object
+		.Object@estimatedPerformance <- foldResults[3];
+		.Object@environmentalParameter <- foldResults[1];	
+	} else {
+		# if no optimization is done, save 5 to use exactly 5 neighbors
+		.Object@estimatedPerformance <- 0;
+		.Object@environmentalParameter <- 5;	
+	}
+	.Object@predictionsOfTrainingData <- predictionsOfTrainingData;
+	
+	# predict confidences of training data	
+	responses <- getResponses(.Object@trainingData);
+	confidencesTrain <- estimate(.Object, .Object@trainingData, predictionsOfTrainingData)[,1];  
+	
+	# use predicted confidences to estimate confidence intervals
+	.Object <- estimateConfidenceIntervals(.Object, responses, predictionsOfTrainingData, confidencesTrain);	
+	.Object;
+})
+
+
+setMethod("estimate", signature("ConfidenceEstimatorDifferenceToNeighbors", "Dataset", "vector"), function(.Object, testData, predictionsOfTestData) {
+	callNextMethod();
+
+	distMatrix <- distTo(testData, .Object@trainingData);
+	numberOfTestInstances <- dim(distMatrix)[1];
+	nns <- .Object@environmentalParameter
+	responses <- getResponses(.Object@trainingData);	
+	errors <- .Object@predictionsOfTrainingData - responses;	
+	
+	#  predict confidence scores by considering nns next neighbors
+	confidences <- mat.or.vec(dim(distMatrix)[1],1) - 500;
+	neighbors <- apply(distMatrix,1,function(x) return(order(x)[1:nns]) );
+	confidences <- lapply(c(1:dim(neighbors)[2]),function(x) 1 - abs(mean(responses[neighbors[,x]]) - predictionsOfTestData[x]) );
+
+	# save scores in value matrix
+	predictedConfidenceValues <- matrix(c(1:3*numberOfTestInstances),numberOfTestInstances,3);
+	predictedConfidenceValues[,1] <- unlist(confidences);
+	
+	# if confidence intervals given, calculate the predicted intervals
+	if (length(.Object@confidenceIntervals) > 1)
+	{
+		predictedConfidenceValues <- predictConfidenceIntervals(.Object@confidenceIntervals, predictionsOfTestData, predictedConfidenceValues[,1]);
+		
+	} else {
+		# otherwise use overall interval
+		predictedConfidenceValues[,2] <- .Object@overallInterval[1];
+		predictedConfidenceValues[,3] <- .Object@overallInterval[2];
+	}
+
+	return(predictedConfidenceValues);	
+})

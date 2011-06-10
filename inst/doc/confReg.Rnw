@@ -1,0 +1,276 @@
+
+\documentclass{article}
+
+\usepackage{amsmath}
+
+\usepackage{natbib}
+\usepackage{indentfirst}
+\usepackage{Sweave}
+
+
+% \VignetteIndexEntry{confReg -- Examples}
+
+\begin{document}
+
+\title{Estimating Confidences of Individual Regression Predictions with confReg}
+\author{Sebastian Briesemeister}
+\maketitle
+
+\section{Introduction}
+
+In contrast to classification approaches, where the uncertainty 
+between classes is an indicator of reliability, most regression
+methods do not offer an opportunity to estimate the confidence of
+individual predictions.
+
+In this package, we wrap different methods for confidence estimation
+for regression prediction. In addition, the package implements a linear
+regression, a ridge regression, a support vector regression, and a
+simple feature selection approach. Every confidence
+estimator measures the confidence in a prediction using a confidence
+score between zero and one, where a confidence score of zero 
+corresponds to a low-confidence prediction and a score close to one
+corresponds to a highly confident prediction. In addition, confidence
+scores are translated into confidence intervals, in which the
+prediced response lies with a probability of $80\%$. Given a good
+confidence estimation, the confidence intervals will be tighter for
+confident predictions.
+
+To load the package type:
+
+<<load-package>>=
+library("confReg")
+@
+
+
+\section{An Artificial Dataset}
+
+We first create an artificial dataset for testing the described
+methods of this package. We create a dataset of 200 instances
+with 10 features and one response. The response is created by applying
+the Friedman function to the first five features and adding some noise.
+
+<<data-creation>>=
+set.seed(100)
+dataMatrix <- matrix(runif(10*200),200,10)
+y<- (10*sin(pi*dataMatrix[,1]*dataMatrix[,2])+20*(dataMatrix[,3]-0.5)^2+10*dataMatrix[,4]+5*dataMatrix[,5]) + rnorm(200,0,0.1)
+dataMatrix <- cbind(dataMatrix,y)
+@
+
+After creating the data matrix, we save the data in a Dataset object
+of the package.
+
+<<data-oject-creation>>=
+data <- Dataset(dataMatrix);
+@
+
+Since we have to test our methods, we split the dataset in
+a training and test dataset. We calculate the fold assignment for
+every instance assuming a split in five parts and assign set five
+as our test set.
+
+<<data-oject-split>>=
+folds <- calculateFolds(data, 5, random=TRUE);
+datasets <- splitByFolds(data, folds, 5);
+@
+
+Finally, we normalize the training dataset to zero mean and a
+standard deviation of one and apply the same normalization to
+the test dataset.
+
+<<data-oject-normalize>>=
+trainingData <- normalize(datasets[[1]]);
+testData <- normalizeBy(datasets[[2]], trainingData);
+@
+
+
+\section{Model Creation}
+
+Lets create a model on our training data. For this, we
+will first select features since some features in the dataset
+are non-predictive. We first create a regression object and
+a model evaluation object, which is needed for evaluating
+the worth of a feature set in the feature selection.
+The regression object can be created with any regression
+method that uses a formula as input for training, e.g.\ ``lm''
+and has a corresponding prediction function, e.g.\ ``predict''.
+
+<<modelcreation1>>=
+me <- ModelEvaluation();
+rModel <- Regression(lm, predict);
+@
+
+Note, that we could also use the provided FastRegression 
+object, which is a fast implementation of a ridge regression.
+
+<<modelcreation2>>=
+rModel <- FastRegression();
+@
+
+We then create a feature selection object, namely a TwinScan
+object, which aims to minimizes the average
+error of predictions made with a feature set.
+
+<<feature-selection-creation>>=
+fs <- TwinScan(averageError, min);
+@
+
+Now, we select a feature set from the training data using the
+above objects.
+
+<<feature-selection-selection>>=
+featureList <- selectFeatures(fs, trainingData, me, randomize=TRUE, rModel)
+featureList
+@
+
+Lets create a model using the selected feature set.
+
+<<model-creation>>=
+featureSet(trainingData) <- featureList;
+rModel <- learnFromDataset(rModel, trainingData);
+@
+
+\section{Model Testing}
+
+Before we come to the actual confidence estimation, lets test
+our model on the test data. We assign the feature set
+of the training data to the test data and predict the
+responses of the test data.
+
+<<model-prediction>>=
+featureSet(testData) <- featureList;
+predictions <- predictDataset(rModel, testData);
+predictions
+@
+
+In contrast, the real response values are:
+
+<<model-responses>>=
+getResponses(testData)
+@
+
+To evaluate the model, lets calculate the average squared error
+of the predicted responses.
+
+<<model-eval1>>=
+averageError(getResponses(testData),predictions);
+@
+
+Since we normalized the responses the average squared error,
+the real average squared error is calculated as follows.
+
+<<model-eval2>>=
+realResponses <- unscaleVector(testData, getResponses(testData));
+realPredictions <- unscaleVector(testData, predictions);
+averageError(realResponses, realPredictions);
+@
+
+To get a more precise view on the performance of the model,
+we can also start a five-fold nested cross-validation.
+
+<<model-eval3>>=
+evaluateInCV(me, data, rModel, 5, random=FALSE, fs);
+@
+
+The returned value is the average result of the quality
+function, assigned at the moment of creating the ModelEvaluation
+object, the average squared error in our case.
+
+\section{Confidence Estimation}
+
+To predict confidence scores and confidence intervals in
+addition to our plain predicted responses, we first
+create ConfidenceEstimator object. In our case, we use
+ConfidenceEstimatorNNErrors, which estimates the
+confidence of each prediction by calculating the
+average sqaured error the the $m$ nearest neighbors.
+
+<<confidence-1>>=
+ce <- ConfidenceEstimatorNNErrors(rModel, trainingData);
+@
+
+To train our confidence estimator, we have to provide
+predictions on the training data. In addition, we have
+to decide whether we want to optimize our estimator
+on the training dataset or want to use a kernel
+estimate instead. We choose to optimize the estimator
+since it often leads to better results
+
+<<confidence-2>>=
+predictionsTrainingData <- predictDataset(rModel, trainingData);
+ce <- create(ce, optimize=TRUE, predictionsTrainingData);
+@
+
+Now, the estimator is trained and can be used to predict
+the confidences of our predictions.
+
+<<confidence-3>>=
+confidences <- estimate(ce, testData, predictions);
+confidences
+@
+
+For each instance in the test set, the estimator returned
+a score and a lower and an upper bound of an $80\%$
+confidence interval.
+
+To analyze the quality of our confidence estimation on the
+training data, we calculate the correlation of the prediction
+errors with the width of the corresponding confidence intervals
+
+<<confidence-4>>=
+evaluateConfidenceEstimates( getResponses(testData), predictions, confidences);
+@
+
+Depending on the random artificial dataset, we see different
+results.  On average the correlation is positive.
+If we would repeat everything with
+a dataset of say $1000$ instances, the correlation would very likely
+increase since confidence estimation is usally much more stable on
+large datasets.
+
+An alternative way of looking at the enrichment of predictions with a
+low error is by calculating the confidence associated prediction improvement.
+The prediction improvement shows by what percentage the average
+squared error is reduced if we consider only the $20\%$ predictions
+with the smalles confidence interval.
+Therefore, we calculate the average squared error of the top $20\%$
+predictions and normalize it by the error on all predictions.
+
+<<confidence-4>>=
+interval_widths <- confidences[,3]-confidences[,2]
+top20 <- which( interval_widths <= sort(interval_widths)[ length(interval_widths)*0.2]);
+top20Error <- averageError(getResponses(testData)[top20],predictions[top20]) 
+top20Error
+overallError <- averageError(getResponses(testData),predictions)
+overallError
+(1-top20Error / overallError)*100;
+@
+
+
+Finally, we can evaluate the estimated confidence intervals 
+by plotting the intervals and the predicted instances~\ref{fig:fig1}.
+
+
+<<label=fig1plot,include=FALSE>>=
+plotConfidenceIntervals(ce, getResponses(testData), predictions, confidences[,1]);
+@
+\begin{figure}
+\begin{center}
+<<label=fig1,fig=TRUE,echo=FALSE>>=
+<<fig1plot>>
+@
+\end{center}
+\caption{Predicted score-based confidence interval and predicted instances.}
+\label{fig:fig1}
+\end{figure}
+
+We expect the confidence interval to be smaller for large
+confidence scores. We also expect about $80\%$ of the
+instances within the interval. However, especially for
+small datasets, often less than the expected number of
+instances is within the interval borders.
+
+
+\end{document}
+
+
